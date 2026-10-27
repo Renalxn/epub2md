@@ -44,12 +44,9 @@ TOC_PAGE = ('<h1>目录</h1><p>第一章 开篇</p><p>重复出现的标题</p>'
 
 
 def make_epub(path, chapters, title='测试书', with_toc_page=False):
-    """chapters: [(文件名, XHTML 正文)]；with_toc_page=True 时插入书自带的纯文字目录页。"""
+    """chapters: [(文件名, XHTML 正文)]；with_toc_page=True 时把书自带的纯文字目录页
+    插在第 1 章之后（模拟真实书的"版权页 → 目录页 → 正文"顺序）。"""
     items, refs, files = [], [], []
-    if with_toc_page:
-        files.append(('OEBPS/toc-page.xhtml', XHTML % TOC_PAGE))
-        items.append('<item id="itoc" href="toc-page.xhtml" media-type="application/xhtml+xml"/>')
-        refs.append('<itemref idref="itoc"/>')
     with zipfile.ZipFile(path, 'w') as zf:
         zf.writestr(zipfile.ZipInfo('mimetype'), 'application/epub+zip')
         zf.writestr('META-INF/container.xml', CONTAINER)
@@ -57,6 +54,11 @@ def make_epub(path, chapters, title='测试书', with_toc_page=False):
             files.append(('OEBPS/' + fname, XHTML % body))
             items.append('<item id="i%d" href="%s" media-type="application/xhtml+xml"/>' % (i, fname))
             refs.append('<itemref idref="i%d"/>' % i)
+            if with_toc_page and i == 1:
+                files.append(('OEBPS/toc-page.xhtml', XHTML % TOC_PAGE))
+                items.append('<item id="itoc" href="toc-page.xhtml" '
+                             'media-type="application/xhtml+xml"/>')
+                refs.append('<itemref idref="itoc"/>')
         zf.writestr('OEBPS/style.css', 'p { color: black }')
         points = ''.join(NAVPOINT % (n, n, t, 'c1.xhtml') for n, t in enumerate(
             ['第一章 开篇', '重复出现的标题', '第二章', '重复出现的标题',
@@ -109,10 +111,11 @@ class Epub2mdTest(unittest.TestCase):
                       self.run_cli('--version'))
 
     def test_spine_order_and_meta_title(self):
-        title, chunks, dropped = epub2md.load_chunks(self.epub)
+        title, chunks, dropped, toc_pos = epub2md.load_chunks(self.epub)
         self.assertEqual(title, '测试书')
         self.assertEqual([name for name, _ in chunks], ['c1.xhtml', 'c2.xhtml'])
         self.assertEqual(dropped, [])
+        self.assertIsNone(toc_pos)
 
     def test_obsidian_output_has_clickable_resolved_toc(self):
         self.run_cli(self.epub, '-o', self.out)
@@ -183,9 +186,10 @@ class Epub2mdTest(unittest.TestCase):
             zf.writestr('OEBPS/content.opf',
                         OPF % ('无目录书', '<item id="i1" href="toc-page.xhtml" '
                                'media-type="application/xhtml+xml"/>', '<itemref idref="i1"/>'))
-        _, chunks, dropped = epub2md.load_chunks(p)
+        _, chunks, dropped, toc_pos = epub2md.load_chunks(p)
         self.assertEqual([n for n, _ in chunks], ['toc-page.xhtml'])
         self.assertEqual(dropped, [])
+        self.assertIsNone(toc_pos)
 
     def test_book_own_toc_page_dropped_by_default(self):
         """默认剔除书自带的纯文字目录页，输出里只剩一份可点击目录。"""
@@ -195,6 +199,26 @@ class Epub2mdTest(unittest.TestCase):
         self.assertNotIn('目录\n\n引', text)
         total, bad = epub2md.verify(self.out)
         self.assertEqual(bad, [], '%s' % bad)
+
+    def test_generated_toc_sits_where_book_toc_page_was(self):
+        """目录页夹在第 1 章与第 2 章之间时，生成的可点击目录也放在同一位置，
+        保证成书顺序（第 1 章 → 目录 → 第 2 章）与原书一致。"""
+        self.run_cli(self.epub_with_toc_page(), '-o', self.out)
+        text = self.read()
+        self.assertLess(text.index('# 第一章 开篇'), text.index('## 目录'),
+                        '第 1 章应排在目录之前（原书顺序）')
+        self.assertLess(text.index('## 目录'), text.index('# 第二章'),
+                        '第 2 章应排在目录之后（原书顺序）')
+        total, bad = epub2md.verify(self.out)
+        self.assertEqual(bad, [], '%s' % bad)
+        self.assertEqual(total, 4, '目录要同时命中目录页之前和之后的标题')
+
+    def test_order_preserved_when_book_has_no_toc_page(self):
+        """原书没有目录页时，章节顺序不变，目录仍放最前。"""
+        self.run_cli(self.epub, '-o', self.out)
+        text = self.read()
+        self.assertLess(text.index('## 目录'), text.index('# 第一章 开篇'))
+        self.assertLess(text.index('# 第一章 开篇'), text.index('# 第二章'))
 
     def test_keep_toc_page_option_restores_it(self):
         self.run_cli(self.epub_with_toc_page(), '-o', self.out, '--keep-toc-page')

@@ -12,7 +12,7 @@ import zipfile
 from html.parser import HTMLParser
 from xml.etree import ElementTree as ET
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 
 def localname(tag):
@@ -162,8 +162,8 @@ def looks_like_repeat_toc(text, ref_titles):
 
 
 def load_chunks(epub, drop_repeat_toc=True):
-    """返回 (书名, [(文件名, 正文)], [被剔除的重复目录页说明])。"""
-    chunks, dropped = [], []
+    """返回 (书名, [(文件名, 正文)], [被剔除的重复目录页说明], 该目录页在原书里的位置)。"""
+    chunks, dropped, toc_pos = [], [], None
     with zipfile.ZipFile(epub) as zf:
         opf = opf_path(zf)
         manifest, order, title = spine_and_meta(zf, opf)
@@ -184,9 +184,11 @@ def load_chunks(epub, drop_repeat_toc=True):
                 is_toc, why = looks_like_repeat_toc(text, ref_titles)
                 if is_toc:
                     dropped.append('%s（%s）' % (posixpath.basename(name), why))
+                    if toc_pos is None:
+                        toc_pos = len(chunks)
                     continue
             chunks.append((posixpath.basename(name), text))
-    return title, chunks, dropped
+    return title, chunks, dropped, toc_pos
 
 
 HEADING_RE = re.compile(r'^(#{1,6}) (.+)$')
@@ -253,13 +255,16 @@ def verify(path):
     """从磁盘读回文件，检查目录里每条链接都能命中正文标题。"""
     with open(path, encoding='utf-8') as fh:
         text = fh.read()
-    _, sep, rest = text.partition('## 目录\n')
+    head, sep, rest = text.partition('## 目录\n')
     if not sep:
         return None, ['文件里没有目录']
     toc_part, sep2, body_part = rest.partition('\n---\n')
     if not sep2:
         return None, ['目录块后找不到分隔线']
-    titles = [t for _, t in all_headings(body_part)]
+    # 目录插在正文中间（原书目录页所在位置），所以目录之前的书名页、版权页
+    # 也算正文标题。head 里第一个标题是脚本自己加的书名，不参与目录，需排除。
+    before = all_headings(head)[1:]
+    titles = [t for _, t in before + all_headings(body_part)]
     anchors = gh_anchors(titles)
     bad, total = [], 0
     for line in toc_part.split('\n'):
@@ -273,6 +278,34 @@ def verify(path):
             if s.split('](#')[1].rstrip(')') not in anchors:
                 bad.append(s)
     return total, bad
+
+
+def number_duplicate_headings(parts, depth):
+    """Obsidian 里同名标题只会跳到第一个，所以给正文第 2 个及以后的同名标题加序号。
+
+    parts 是"每个内容块一段文本"，按块处理而不是拼成一整篇再切，
+    这样目录插入位置（也靠块下标定位）不会和分隔符混淆。
+    gh 样式不走这里：GitHub/VS Code 自己按出现顺序给锚点追加 -1/-2。
+    """
+    counter = {}
+    for level, t in all_headings('\n\n'.join(parts)):
+        if level <= depth:
+            counter[t] = counter.get(t, 0) + 1
+    dupes = {t for t, c in counter.items() if c > 1}
+    if not dupes:
+        return parts
+    seen, out = {}, []
+    for part in parts:
+        lines = part.split('\n')
+        for i, line in enumerate(lines):
+            m = HEADING_RE.match(line)
+            if m and len(m.group(1)) <= depth and m.group(2) in dupes:
+                t = m.group(2)
+                seen[t] = seen.get(t, 0) + 1
+                if seen[t] > 1:
+                    lines[i] = '%s %s %d' % (m.group(1), t, seen[t])
+        out.append('\n'.join(lines))
+    return out
 
 
 def main():
@@ -289,7 +322,7 @@ def main():
                     help='保留 epub 自带的纯文字目录页（默认剔除，避免和可点击目录重复）')
     a = ap.parse_args()
 
-    title, chunks, dropped = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
+    title, chunks, dropped, toc_pos = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
 
     if a.stats:
         for i, (name, text) in enumerate(chunks, 1):
@@ -298,35 +331,24 @@ def main():
         print('\n%d blocks, %d chars' % (len(chunks), sum(len(t) for _, t in chunks)))
         return
 
-    body = '\n\n---\n\n'.join(normalize_headings(t) for _, t in chunks if t)
+    parts = [normalize_headings(t) for _, t in chunks if t]
     n_entries = 0
 
     if not a.no_toc:
-        # Obsidian 的同名标题跳转只会命中第一个，所以给正文里第 2 个及以后的
-        # 同名标题加序号，目录链接跟着用同一个名字。gh 样式不改正文，
-        # 因为 GitHub/VS Code 自己按出现顺序给锚点追加 -1/-2。
-        dupes = set()
         if a.toc_style == 'obsidian':
-            counter = {}
-            for _, t in all_headings(body):
-                if _ <= a.toc_depth:
-                    counter[t] = counter.get(t, 0) + 1
-            dupes = {t for t, c in counter.items() if c > 1}
-
-        if dupes:
-            seen, lines = {}, body.split('\n')
-            for i, line in enumerate(lines):
-                m = HEADING_RE.match(line)
-                if m and len(m.group(1)) <= a.toc_depth and m.group(2) in dupes:
-                    t = m.group(2)
-                    seen[t] = seen.get(t, 0) + 1
-                    if seen[t] > 1:
-                        lines[i] = '%s %s %d' % (m.group(1), t, seen[t])
-            body = '\n'.join(lines)
-
+            parts = number_duplicate_headings(parts, a.toc_depth)
+        body = '\n\n---\n\n'.join(parts)
         toc, n_entries = build_toc(body, a.toc_style, a.toc_depth)
-        md = '# %s\n\n%s\n%s\n' % (title, toc, body)
+        # 目录放回原书目录页所在的位置，保持书的前后顺序和原书一致；
+        # 原书没有目录页时（toc_pos 为 None）仍然放在最前面。
+        pos = min(toc_pos, len(parts)) if toc_pos is not None else 0
+        head_block = '\n\n---\n\n'.join(parts[:pos])
+        md = '# %s\n\n' % title
+        if head_block:
+            md += head_block + '\n\n---\n\n'
+        md += toc + '\n\n---\n\n'.join(parts[pos:]) + '\n'
     else:
+        body = '\n\n---\n\n'.join(parts)
         md = '# %s\n\n' % title + body + '\n'
 
     out = os.path.abspath(a.out or posixpath.splitext(posixpath.basename(a.epub))[0] + '.md')
