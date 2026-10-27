@@ -22,10 +22,28 @@ ln -s "$PWD/epub2md/epub2md.py" ~/.local/bin/epub2md   # 让 ~/.local/bin 在 PA
 ```bash
 epub2md --stats book.epub                    # 先看各内容块字数，判断能否一次读完
 epub2md book.epub -o ~/notes/书名.md          # 转换，默认 Obsidian 可点目录
+epub2md book.epub -o 书名.md --tags 电子书,心理 # 顺带写 Obsidian frontmatter，标签面板能聚合
 epub2md book.epub -o out.md --toc-style gh    # 换成 VS Code / GitHub / Typora 能点的锚点
 epub2md book.epub -o out.md --keep-toc-page   # 保留 epub 自带的纯文字目录页
 epub2md --version
 ```
+
+## 标签（--tags）
+
+Obsidian 的标签面板只认文件**最开头**的 YAML 块，所以 `--tags 电子书,心理,认知提升` 会在文件顶部写：
+
+```yaml
+---
+tags:
+  - "电子书"
+  - "心理"
+  - "认知提升"
+---
+```
+
+不传 `--tags` 就不写这个块，输出和不带本功能的版本逐字节相同。中英文逗号、顿号都能分隔，重复标签自动去掉，标签里的 `:` `"` 会加引号或转义，不会把 YAML 写坏。
+
+注意两点：这个块占 7 行（6 行 YAML + 1 行空行），**全文行号会整体下移 7 行**，任何按行号引用正文的地方都要按标题名重算；另外重新转换会覆盖整个文件，手写在文件里的批注会没——要批注请另开笔记，或用 Obsidian 的高亮/侧注。
 
 ## 书自带的纯文字目录页会被自动剔除
 
