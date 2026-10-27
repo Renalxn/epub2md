@@ -224,6 +224,40 @@ class Epub2mdTest(unittest.TestCase):
         self.run_cli(self.epub_with_toc_page(), '-o', self.out, '--keep-toc-page')
         self.assertIn('# 目录', self.read())
 
+    def test_default_output_has_no_frontmatter(self):
+        """不传 --tags 时一个字都不能多，保证旧产物的 md5 仍然可比对。"""
+        self.run_cli(self.epub, '-o', self.out)
+        self.assertTrue(self.read().startswith('# 测试书\n'), '开头不该有 frontmatter')
+
+    def test_tags_write_frontmatter_at_the_very_top(self):
+        """Obsidian 标签面板只认文件最开头的 YAML 块。"""
+        self.run_cli(self.epub, '-o', self.out, '--tags', '心理,成长')
+        self.assertTrue(self.read().startswith(
+            '---\ntags:\n  - "心理"\n  - "成长"\n---\n\n# 测试书\n'))
+
+    def test_tags_are_split_deduped_and_ordered(self):
+        """中英文逗号、顿号都当分隔符；重复标签只留一份；顺序按用户输入。"""
+        self.assertEqual(epub2md.parse_tags('心理，成长, 心理 、 心理 '), ['心理', '成长'])
+        self.assertEqual(epub2md.parse_tags('  , ， '), [])
+
+    def test_frontmatter_quotes_yaml_special_characters(self):
+        """标签里带 : " \\ 时不能把 YAML 结构写坏。"""
+        block = epub2md.frontmatter(['带: 冒号', '带"引号'])
+        self.assertIn('  - "带: 冒号"', block)
+        self.assertIn(r'  - "带\"引号"', block)
+
+    def test_toc_self_check_still_passes_with_frontmatter(self):
+        """frontmatter 占掉文件开头后，目录自检仍要逐条命中正文标题。"""
+        self.run_cli(self.epub_with_toc_page(), '-o', self.out, '--tags', '心理')
+        total, bad = epub2md.verify(self.out)
+        self.assertEqual(bad, [], '%s' % bad)
+        self.assertEqual(total, 4)
+
+    def test_tags_with_only_separators_writes_no_frontmatter(self):
+        out = self.run_cli(self.epub, '-o', self.out, '--tags', '，,,')
+        self.assertIn('未写入 frontmatter', out)
+        self.assertTrue(self.read().startswith('# 测试书\n'))
+
 
 if __name__ == '__main__':
     unittest.main()

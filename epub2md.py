@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """epub -> markdown, stdlib only.
 
-    epub2md <book.epub> [-o out.md] [--stats]
+    epub2md <book.epub> [-o out.md] [--stats] [--tags 标签1,标签2]
 """
 import argparse
 import html
@@ -12,7 +12,7 @@ import zipfile
 from html.parser import HTMLParser
 from xml.etree import ElementTree as ET
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 
 
 def localname(tag):
@@ -308,6 +308,27 @@ def number_duplicate_headings(parts, depth):
     return out
 
 
+def parse_tags(raw):
+    """--tags 的输入清洗：中英文逗号、顿号都当分隔符，去空白、去重、保持顺序。"""
+    out = []
+    for part in re.split(r'[,，、]', raw):
+        t = part.strip()
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
+def frontmatter(tags):
+    """Obsidian 的标签面板只认文件最开头的 YAML 块，所以这块必须占第一行。
+
+    每条标签都加引号：标签里带 `:` `#` `-` 等 YAML 特殊字符时不会被解析成结构。
+    """
+    lines = ['---', 'tags:']
+    for t in tags:
+        lines.append('  - "%s"' % t.replace('\\', '\\\\').replace('"', '\\"'))
+    return '\n'.join(lines) + '\n---\n\n'
+
+
 def main():
     ap = argparse.ArgumentParser(prog='epub2md', description=__doc__.strip())
     ap.add_argument('epub')
@@ -320,6 +341,8 @@ def main():
     ap.add_argument('--no-toc', action='store_true', help='不生成目录')
     ap.add_argument('--keep-toc-page', action='store_true',
                     help='保留 epub 自带的纯文字目录页（默认剔除，避免和可点击目录重复）')
+    ap.add_argument('--tags', help='写进文件开头 frontmatter 的 Obsidian 标签，逗号分隔，'
+                    '如 --tags 心理,成长；不传则不写 frontmatter，输出与旧版逐字节一致')
     a = ap.parse_args()
 
     title, chunks, dropped, toc_pos = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
@@ -353,10 +376,17 @@ def main():
 
     out = os.path.abspath(a.out or posixpath.splitext(posixpath.basename(a.epub))[0] + '.md')
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    tags = parse_tags(a.tags) if a.tags else []
+    if tags:
+        md = frontmatter(tags) + md
     with open(out, 'w', encoding='utf-8') as fh:
         fh.write(md)
 
     print('已写出 %s' % out)
+    if tags:
+        print('frontmatter 标签：%s' % '、'.join(tags))
+    elif a.tags:
+        print('!! --tags 里没有有效标签（只有分隔符），未写入 frontmatter')
     print('目录 %d 条（样式 %s，深度 %d），正文 %d 字符'
           % (n_entries, a.toc_style, a.toc_depth, len(body)))
     for d in dropped:
