@@ -12,7 +12,7 @@ import zipfile
 from html.parser import HTMLParser
 from xml.etree import ElementTree as ET
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 
 def localname(tag):
@@ -101,10 +101,73 @@ def spine_and_meta(zf, opf):
     return manifest, [s for s in spine if s in manifest], (titles[0] if titles else '')
 
 
-def load_chunks(epub):
-    chunks = []
+def _norm(s):
+    """标题比对用的归一化：抹掉空格（含全角）、标点、数字符号，只留中英文和数字。
+    NCX 条目和目录页文字必须用同一个函数处理，否则空格差异会导致比对失败。"""
+    return re.sub(r'[^0-9a-z\u4e00-\u9fff]+', '', s.lower())
+
+
+def ncx_titles(zf, opf):
+    """读取 epub 官方目录（toc.ncx / EPUB3 nav 文档）里的标题集合。"""
+    raws = []
+    root = ET.fromstring(zf.read(opf).decode('utf-8', 'ignore'))
+    base_dir = posixpath.dirname(opf)
+    targets = []
+    for el in root.iter():
+        if localname(el.tag) == 'item':
+            mt = (el.get('media-type') or '').lower()
+            href = (el.get('href') or '').split('#')[0]
+            if mt.endswith('ncx+xml') or href.lower().endswith('.ncx'):
+                targets.append(href)
+            if 'nav' in (el.get('properties') or ''):
+                targets.append(href)
+    for cand in targets:
+        path = posixpath.normpath(posixpath.join(base_dir, cand)) if base_dir else cand
+        try:
+            raws.append(zf.read(path).decode('utf-8', 'ignore'))
+        except KeyError:
+            continue
+    titles = set()
+    for raw in raws:
+        for m in re.finditer(r'<text>([^<]*)</text>', raw):
+            t = m.group(1).strip()
+            if t:
+                titles.add(_norm(t))
+        for m in re.finditer(r'<a[^>]*>([^<]*)</a>', raw):
+            t = m.group(1).strip()
+            if t:
+                titles.add(_norm(t))
+    return {t for t in titles if t}
+
+
+TOC_WORDS = {'目录', '目次', 'contents', 'tableofcontents', 'toc'}
+
+
+def looks_like_repeat_toc(text, ref_titles):
+    """判断某块是否为"纯文字目录页"：首行是目录标题 + 与官方目录高度重合 + 无长段落。"""
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if len(lines) < 8:
+        return False, ''
+    if _norm(lines[0]) not in TOC_WORDS:
+        return False, ''
+    entries = [_norm(l) for l in lines[1:]]
+    entries = [e for e in entries if e]
+    if not entries:
+        return False, ''
+    hits = sum(1 for e in entries if e in ref_titles)
+    overlap = hits / len(entries)
+    long_lines = sum(1 for l in lines if len(l) > 60)
+    why = '与官方目录重合 %d/%d（%.0f%%），%d 行' % (hits, len(entries), overlap * 100, len(lines))
+    return (overlap >= 0.5 and long_lines == 0), why
+
+
+def load_chunks(epub, drop_repeat_toc=True):
+    """返回 (书名, [(文件名, 正文)], [被剔除的重复目录页说明])。"""
+    chunks, dropped = [], []
     with zipfile.ZipFile(epub) as zf:
-        manifest, order, title = spine_and_meta(zf, opf_path(zf))
+        opf = opf_path(zf)
+        manifest, order, title = spine_and_meta(zf, opf)
+        ref_titles = ncx_titles(zf, opf)
         for idref in order:
             name = manifest[idref]
             if not name.lower().endswith(('.xhtml', '.html', '.htm')):
@@ -115,9 +178,15 @@ def load_chunks(epub):
                 text = body.text()
             except KeyError:
                 continue
-            if text:
-                chunks.append((posixpath.basename(name), text))
-    return title, chunks
+            if not text:
+                continue
+            if drop_repeat_toc:
+                is_toc, why = looks_like_repeat_toc(text, ref_titles)
+                if is_toc:
+                    dropped.append('%s（%s）' % (posixpath.basename(name), why))
+                    continue
+            chunks.append((posixpath.basename(name), text))
+    return title, chunks, dropped
 
 
 HEADING_RE = re.compile(r'^(#{1,6}) (.+)$')
@@ -216,9 +285,11 @@ def main():
                     help='obsidian=[[#标题]]；gh=[标题](#标题锚点)，适用 VS Code/GitHub/Typora')
     ap.add_argument('--toc-depth', type=int, default=3, help='目录收录到第几级标题')
     ap.add_argument('--no-toc', action='store_true', help='不生成目录')
+    ap.add_argument('--keep-toc-page', action='store_true',
+                    help='保留 epub 自带的纯文字目录页（默认剔除，避免和可点击目录重复）')
     a = ap.parse_args()
 
-    title, chunks = load_chunks(a.epub)
+    title, chunks, dropped = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
 
     if a.stats:
         for i, (name, text) in enumerate(chunks, 1):
@@ -266,6 +337,8 @@ def main():
     print('已写出 %s' % out)
     print('目录 %d 条（样式 %s，深度 %d），正文 %d 字符'
           % (n_entries, a.toc_style, a.toc_depth, len(body)))
+    for d in dropped:
+        print('已剔除 epub 自带的重复目录页：%s' % d)
     if a.no_toc:
         print('未生成目录')
     else:

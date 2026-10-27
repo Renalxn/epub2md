@@ -23,8 +23,15 @@ ln -s "$PWD/epub2md/epub2md.py" ~/.local/bin/epub2md   # 让 ~/.local/bin 在 PA
 epub2md --stats book.epub                    # 先看各内容块字数，判断能否一次读完
 epub2md book.epub -o ~/notes/书名.md          # 转换，默认 Obsidian 可点目录
 epub2md book.epub -o out.md --toc-style gh    # 换成 VS Code / GitHub / Typora 能点的锚点
+epub2md book.epub -o out.md --keep-toc-page   # 保留 epub 自带的纯文字目录页
 epub2md --version
 ```
+
+## 书自带的纯文字目录页会被自动剔除
+
+很多 epub 正文里有一页“目录”，只是一堆不能点击的文字行，和上面生成的可点击目录完全重复。转换时默认删掉它，并在终端报告删了哪个文件、判断依据是什么。
+
+删错正文的代价太大，所以识别条件是三件事同时成立：该块首行是“目录/目次/contents”；条目与 epub 官方目录（`toc.ncx` 或 EPUB3 nav）重合度 ≥50%；全块没有超过 60 字的长行。读不到官方目录的书**一律不删**，宁可留一份重复目录。想保留原样加 `--keep-toc-page`。
 
 ## 两种目录链接语法互不通用
 

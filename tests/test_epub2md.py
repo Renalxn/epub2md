@@ -26,28 +26,59 @@ OPF = ('<?xml version="1.0"?>'
        '<package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
        '<dc:title>%s</dc:title></metadata>'
-       '<manifest>%s<style id="s" href="style.css" media-type="text/css"/></manifest>'
-       '<spine>%s</spine></package>')
+       '<manifest>%s<style id="s" href="style.css" media-type="text/css"/>'
+       '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>'
+       '<spine toc="ncx">%s</spine></package>')
+
+NCX = ('<?xml version="1.0"?>'
+       '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">'
+       '<navMap>%s</navMap></ncx>')
+
+NAVPOINT = ('<navPoint id="n%d" playOrder="%d"><navLabel><text>%s</text></navLabel>'
+            '<src>%s</src></navPoint>')
+
+# 书自带的"纯文字目录页"：条目与 NCX 完全一致，且没有长段落
+TOC_PAGE = ('<h1>目录</h1><p>第一章 开篇</p><p>重复出现的标题</p>'
+            '<p>第二章</p><p>重复出现的标题</p><p>要点一</p><p>要点二</p>'
+            '<p>附录</p><p>致谢</p>')
 
 
-def make_epub(path, chapters, title='测试书'):
-    items, refs = [], []
+def make_epub(path, chapters, title='测试书', with_toc_page=False):
+    """chapters: [(文件名, XHTML 正文)]；with_toc_page=True 时插入书自带的纯文字目录页。"""
+    items, refs, files = [], [], []
+    if with_toc_page:
+        files.append(('OEBPS/toc-page.xhtml', XHTML % TOC_PAGE))
+        items.append('<item id="itoc" href="toc-page.xhtml" media-type="application/xhtml+xml"/>')
+        refs.append('<itemref idref="itoc"/>')
     with zipfile.ZipFile(path, 'w') as zf:
         zf.writestr(zipfile.ZipInfo('mimetype'), 'application/epub+zip')
         zf.writestr('META-INF/container.xml', CONTAINER)
-        for i, body in enumerate(chapters, 1):
-            zf.writestr('OEBPS/c%d.xhtml' % i, XHTML % body)
-            items.append('<item id="i%d" href="c%d.xhtml" media-type="application/xhtml+xml"/>' % (i, i))
+        for i, (fname, body) in enumerate(chapters, 1):
+            files.append(('OEBPS/' + fname, XHTML % body))
+            items.append('<item id="i%d" href="%s" media-type="application/xhtml+xml"/>' % (i, fname))
             refs.append('<itemref idref="i%d"/>' % i)
         zf.writestr('OEBPS/style.css', 'p { color: black }')
+        points = ''.join(NAVPOINT % (n, n, t, 'c1.xhtml') for n, t in enumerate(
+            ['第一章 开篇', '重复出现的标题', '第二章', '重复出现的标题',
+             '要点一', '要点二', '附录', '致谢'], 1))
+        zf.writestr('OEBPS/toc.ncx', NCX % points)
+        for name, content in files:
+            zf.writestr(name, content)
         zf.writestr('OEBPS/content.opf', OPF % (title, ''.join(items), ''.join(refs)))
-
 
 CHAPTER_ONE = ('<h1>第一章\u3000开篇</h1><p>第一段正文，含 <em>强调</em> 与 &amp; 符号。</p>'
                '<h2>重复出现的标题</h2><p>甲。</p>')
 CHAPTER_TWO = ('<h1>第二章</h1><p>第二段\u3000正文。</p>'
                '<h2>重复出现的标题</h2><p>乙。</p>'
                '<ul><li>要点一</li><li>要点二</li></ul>')
+CHAPTERS = [('c1.xhtml', CHAPTER_ONE), ('c2.xhtml', CHAPTER_TWO)]
+
+
+def epub2md_text(body):
+    """把一段 XHTML 正文片段转成脚本实际得到的文本，供判据单测使用。"""
+    t = epub2md.Textify()
+    t.feed(XHTML % body)
+    return t.text()
 
 
 class Epub2mdTest(unittest.TestCase):
@@ -55,8 +86,13 @@ class Epub2mdTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.epub = os.path.join(self.tmp.name, 'mini.epub')
-        make_epub(self.epub, [CHAPTER_ONE, CHAPTER_TWO])
+        make_epub(self.epub, CHAPTERS)
         self.out = os.path.join(self.tmp.name, 'mini.md')
+
+    def epub_with_toc_page(self):
+        p = os.path.join(self.tmp.name, 'mini-toc.epub')
+        make_epub(p, CHAPTERS, with_toc_page=True)
+        return p
 
     def run_cli(self, *args):
         proc = subprocess.run([sys.executable, SCRIPT] + list(args),
@@ -73,9 +109,10 @@ class Epub2mdTest(unittest.TestCase):
                       self.run_cli('--version'))
 
     def test_spine_order_and_meta_title(self):
-        title, chunks = epub2md.load_chunks(self.epub)
+        title, chunks, dropped = epub2md.load_chunks(self.epub)
         self.assertEqual(title, '测试书')
         self.assertEqual([name for name, _ in chunks], ['c1.xhtml', 'c2.xhtml'])
+        self.assertEqual(dropped, [])
 
     def test_obsidian_output_has_clickable_resolved_toc(self):
         self.run_cli(self.epub, '-o', self.out)
@@ -125,6 +162,43 @@ class Epub2mdTest(unittest.TestCase):
     def test_stats_reports_block_count(self):
         out = self.run_cli(self.epub, '--stats')
         self.assertIn('2 blocks', out)
+
+    def test_repeat_toc_page_detected(self):
+        """与 epub 官方目录高度重合、且全是短标题的"目录页"应被识别。"""
+        ref = {'第一章开篇', '重复出现的标题', '第二章', '要点一', '要点二', '附录', '致谢'}
+        self.assertTrue(epub2md.looks_like_repeat_toc(epub2md_text(TOC_PAGE), ref)[0])
+
+    def test_real_chapter_is_never_treated_as_toc_page(self):
+        """真正文（长段落 + 首行不是"目录"）绝不能被误判剔除。"""
+        ref = {'第一章开篇', '重复出现的标题', '第二章', '要点一', '要点二', '附录', '致谢'}
+        for body in (CHAPTER_ONE, CHAPTER_TWO):
+            self.assertFalse(epub2md.looks_like_repeat_toc(epub2md_text(body), ref)[0])
+
+    def test_toc_page_without_ncx_reference_is_kept(self):
+        """没有官方目录可比对时，宁可不删，避免误删正文。"""
+        p = os.path.join(self.tmp.name, 'noncx.epub')
+        with zipfile.ZipFile(p, 'w') as zf:
+            zf.writestr('META-INF/container.xml', CONTAINER)
+            zf.writestr('OEBPS/toc-page.xhtml', XHTML % TOC_PAGE)
+            zf.writestr('OEBPS/content.opf',
+                        OPF % ('无目录书', '<item id="i1" href="toc-page.xhtml" '
+                               'media-type="application/xhtml+xml"/>', '<itemref idref="i1"/>'))
+        _, chunks, dropped = epub2md.load_chunks(p)
+        self.assertEqual([n for n, _ in chunks], ['toc-page.xhtml'])
+        self.assertEqual(dropped, [])
+
+    def test_book_own_toc_page_dropped_by_default(self):
+        """默认剔除书自带的纯文字目录页，输出里只剩一份可点击目录。"""
+        self.run_cli(self.epub_with_toc_page(), '-o', self.out)
+        text = self.read()
+        self.assertEqual(text.count('## 目录'), 1, '正文里不该再留一份纯文字目录')
+        self.assertNotIn('目录\n\n引', text)
+        total, bad = epub2md.verify(self.out)
+        self.assertEqual(bad, [], '%s' % bad)
+
+    def test_keep_toc_page_option_restores_it(self):
+        self.run_cli(self.epub_with_toc_page(), '-o', self.out, '--keep-toc-page')
+        self.assertIn('# 目录', self.read())
 
 
 if __name__ == '__main__':
