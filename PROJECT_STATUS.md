@@ -4,20 +4,24 @@
 
 ## 当前版本
 
-**v1.0.0**（2026-10-27）。版本号唯一真源是 `epub2md.py` 里的 `__version__`，`CHANGELOG.md` 记录变更。其他文档不写版本号，避免每次改动都要同步。
+**v1.2.0**（2026-10-27）。版本号唯一真源是 `epub2md.py` 里的 `__version__`，`CHANGELOG.md` 记录变更。其他文档不写版本号，避免每次改动都要同步。
 
 ## 项目目标
 
-把无 DRM 的 epub 转成 Markdown，供在 Obsidian 知识库里阅读和分析。核心硬性要求：**目录必须能点击跳转到对应章节**，这是用户 2026-10-27 提出的长期要求，不是某一次的临时需求。
+把无 DRM 的 epub 转成 Markdown，供在 Obsidian 知识库里阅读和分析。两条硬性要求，都是用户 2026-10-27 提出的长期要求，不是某一次的临时需求：
+
+1. **目录必须能点击跳转到对应章节**
+2. **成书内容的位置要和原书一致** —— 原书自带的纯文字目录页（不能点、与生成的目录重复）默认剔除，生成的可点击目录顶替在那一页原来的位置上，不能一律插到文件最前面
 
 ## 已完成
 
 - 仅标准库解析 epub（container.xml → OPF → spine 顺序 → XHTML）
 - XHTML → Markdown，保留标题层级/列表/粗体斜体，剥离 style/script
-- `--stats` 字数分布，`--toc-style obsidian|gh`，`--toc-depth`，`--no-toc`，`--version`
+- `--stats` 字数分布，`--toc-style obsidian|gh`，`--toc-depth`，`--no-toc`，`--keep-toc-page`，`--version`
 - 写回文件逐条自检目录链接（`verify()`）
 - 全角空格归一化、同名标题去重
-- 测试：`tests/test_epub2md.py`，10 个用例，用代码构造的迷你 epub，不依赖真实书籍
+- 剔除 epub 自带的纯文字目录页，并把可点击目录放回该页原位（三信号识别：首行是目录标题 + 与官方 ncx/nav 重合 ≥50% + 无 60 字以上长行；读不到官方目录则一律不删）
+- 测试：`tests/test_epub2md.py`，17 个用例，用代码构造的迷你 epub，不依赖真实书籍
 - 纳入 git，GitHub 公开仓库 `Renalxn/epub2md`
 
 ## 使用位置与调用方式
