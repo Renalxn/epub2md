@@ -25,7 +25,7 @@ XHTML = ('<?xml version="1.0" encoding="utf-8"?>'
 OPF = ('<?xml version="1.0"?>'
        '<package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
        '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
-       '<dc:title>%s</dc:title></metadata>'
+       '<dc:title>%s</dc:title><dc:creator>%s</dc:creator></metadata>'
        '<manifest>%s<style id="s" href="style.css" media-type="text/css"/>'
        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>'
        '<spine toc="ncx">%s</spine></package>')
@@ -43,7 +43,7 @@ TOC_PAGE = ('<h1>目录</h1><p>第一章 开篇</p><p>重复出现的标题</p>'
             '<p>附录</p><p>致谢</p>')
 
 
-def make_epub(path, chapters, title='测试书', with_toc_page=False):
+def make_epub(path, chapters, title='测试书', with_toc_page=False, author='[某] 测试·作者'):
     """chapters: [(文件名, XHTML 正文)]；with_toc_page=True 时把书自带的纯文字目录页
     插在第 1 章之后（模拟真实书的"版权页 → 目录页 → 正文"顺序）。"""
     items, refs, files = [], [], []
@@ -66,7 +66,7 @@ def make_epub(path, chapters, title='测试书', with_toc_page=False):
         zf.writestr('OEBPS/toc.ncx', NCX % points)
         for name, content in files:
             zf.writestr(name, content)
-        zf.writestr('OEBPS/content.opf', OPF % (title, ''.join(items), ''.join(refs)))
+        zf.writestr('OEBPS/content.opf', OPF % (title, author, ''.join(items), ''.join(refs)))
 
 CHAPTER_ONE = ('<h1>第一章\u3000开篇</h1><p>第一段正文，含 <em>强调</em> 与 &amp; 符号。</p>'
                '<h2>重复出现的标题</h2><p>甲。</p>')
@@ -111,11 +111,12 @@ class Epub2mdTest(unittest.TestCase):
                       self.run_cli('--version'))
 
     def test_spine_order_and_meta_title(self):
-        title, chunks, dropped, toc_pos = epub2md.load_chunks(self.epub)
+        title, chunks, dropped, toc_pos, creators = epub2md.load_chunks(self.epub)
         self.assertEqual(title, '测试书')
         self.assertEqual([name for name, _ in chunks], ['c1.xhtml', 'c2.xhtml'])
         self.assertEqual(dropped, [])
         self.assertIsNone(toc_pos)
+        self.assertEqual(creators, ['[某] 测试·作者'])
 
     def test_obsidian_output_has_clickable_resolved_toc(self):
         self.run_cli(self.epub, '-o', self.out)
@@ -184,9 +185,9 @@ class Epub2mdTest(unittest.TestCase):
             zf.writestr('META-INF/container.xml', CONTAINER)
             zf.writestr('OEBPS/toc-page.xhtml', XHTML % TOC_PAGE)
             zf.writestr('OEBPS/content.opf',
-                        OPF % ('无目录书', '<item id="i1" href="toc-page.xhtml" '
+                        OPF % ('无目录书', '测试作者', '<item id="i1" href="toc-page.xhtml" '
                                'media-type="application/xhtml+xml"/>', '<itemref idref="i1"/>'))
-        _, chunks, dropped, toc_pos = epub2md.load_chunks(p)
+        _, chunks, dropped, toc_pos, _ = epub2md.load_chunks(p)
         self.assertEqual([n for n, _ in chunks], ['toc-page.xhtml'])
         self.assertEqual(dropped, [])
         self.assertIsNone(toc_pos)
@@ -230,10 +231,10 @@ class Epub2mdTest(unittest.TestCase):
         self.assertTrue(self.read().startswith('# 测试书\n'), '开头不该有 frontmatter')
 
     def test_tags_write_frontmatter_at_the_very_top(self):
-        """Obsidian 标签面板只认文件最开头的 YAML 块。"""
+        """Obsidian 标签面板只认文件最开头的 YAML 块；作者标签自动附在后面。"""
         self.run_cli(self.epub, '-o', self.out, '--tags', '心理,成长')
         self.assertTrue(self.read().startswith(
-            '---\ntags:\n  - "心理"\n  - "成长"\n---\n\n# 测试书\n'))
+            '---\ntags:\n  - "心理"\n  - "成长"\n  - "作者/测试-作者"\n---\n\n# 测试书\n'))
 
     def test_tags_are_split_deduped_and_ordered(self):
         """中英文逗号、顿号都当分隔符；重复标签只留一份；顺序按用户输入。"""
@@ -257,6 +258,43 @@ class Epub2mdTest(unittest.TestCase):
         out = self.run_cli(self.epub, '-o', self.out, '--tags', '，,,')
         self.assertIn('未写入 frontmatter', out)
         self.assertTrue(self.read().startswith('# 测试书\n'))
+
+    def test_author_tags_clean_real_world_metadata(self):
+        """dc:creator 常带噪声（以下示例已化名），清洗后必须是 Obsidian 合法标签。"""
+        cases = [
+            ('[某] 甲·乙', ['作者/甲-乙']),
+            ('【某】丙·丁', ['作者/丙-丁']),
+            ('[某]庚', ['作者/庚']),
+            ('戊，己 等', ['作者/戊', '作者/己']),
+            ('辛·壬', ['作者/辛-壬']),
+            ('癸', ['作者/癸']),
+        ]
+        for raw, expect in cases:
+            self.assertEqual(epub2md.author_tags([raw]), expect, '原文 %r 清洗结果不对' % raw)
+
+    def test_author_tags_reject_number_only_and_junk(self):
+        """纯数字标签 Obsidian 不认；只有"等"这种残片也不该变成标签。"""
+        self.assertEqual(epub2md.author_tags(['1984']), [])
+        self.assertEqual(epub2md.author_tags(['等']), [])
+
+    def test_nested_tags_pass_through_verbatim(self):
+        """斜杠是 Obsidian 的层级分隔符，脚本一个字都不能动。"""
+        self.run_cli(self.epub, '-o', self.out, '--tags', '电子书/心理学/思维模式')
+        self.assertIn('  - "电子书/心理学/思维模式"', self.read())
+
+    def test_no_author_tag_option(self):
+        self.run_cli(self.epub, '-o', self.out, '--tags', '心理', '--no-author-tag')
+        self.assertNotIn('作者/', self.read())
+
+    def test_no_tags_means_no_author_hint(self):
+        """不传 --tags 时仍不写 frontmatter（保住逐字节兼容），但要提示作者标签没写。"""
+        out = self.run_cli(self.epub, '-o', self.out)
+        self.assertIn('提示：未传 --tags', out)
+
+    def test_space_in_user_tag_is_warned(self):
+        """Obsidian 1.4 起带空格的标签会被劈成两条，必须提醒而不是闷头写进去。"""
+        out = self.run_cli(self.epub, '-o', self.out, '--tags', '心 理')
+        self.assertIn('不认的字符', out)
 
 
 if __name__ == '__main__':

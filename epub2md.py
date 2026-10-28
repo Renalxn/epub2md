@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """epub -> markdown, stdlib only.
 
-    epub2md <book.epub> [-o out.md] [--stats] [--tags 标签1,标签2]
+    epub2md <book.epub> [-o out.md] [--stats] [--tags 电子书/心理学/思维模式] [--no-author-tag]
 """
 import argparse
 import html
@@ -12,7 +12,7 @@ import zipfile
 from html.parser import HTMLParser
 from xml.etree import ElementTree as ET
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 
 
 def localname(tag):
@@ -88,7 +88,7 @@ def opf_path(zf):
 def spine_and_meta(zf, opf):
     root = ET.fromstring(zf.read(opf).decode('utf-8', 'ignore'))
     base = posixpath.dirname(opf)
-    manifest, spine, titles = {}, [], []
+    manifest, spine, titles, creators = {}, [], [], []
     for el in root.iter():
         t = localname(el.tag)
         if t == 'item' and el.get('href'):
@@ -98,7 +98,9 @@ def spine_and_meta(zf, opf):
             spine.append(el.get('idref'))
         elif t == 'title':
             titles.append(' '.join((el.text or '').split()))
-    return manifest, [s for s in spine if s in manifest], (titles[0] if titles else '')
+        elif t == 'creator':
+            creators.append(' '.join((el.text or '').split()))
+    return manifest, [s for s in spine if s in manifest], (titles[0] if titles else ''), creators
 
 
 def _norm(s):
@@ -162,11 +164,11 @@ def looks_like_repeat_toc(text, ref_titles):
 
 
 def load_chunks(epub, drop_repeat_toc=True):
-    """返回 (书名, [(文件名, 正文)], [被剔除的重复目录页说明], 该目录页在原书里的位置)。"""
+    """返回 (书名, [(文件名, 正文)], [被剔除的重复目录页说明], 该目录页在原书里的位置, 作者元数据)。"""
     chunks, dropped, toc_pos = [], [], None
     with zipfile.ZipFile(epub) as zf:
         opf = opf_path(zf)
-        manifest, order, title = spine_and_meta(zf, opf)
+        manifest, order, title, creators = spine_and_meta(zf, opf)
         ref_titles = ncx_titles(zf, opf)
         for idref in order:
             name = manifest[idref]
@@ -188,7 +190,7 @@ def load_chunks(epub, drop_repeat_toc=True):
                         toc_pos = len(chunks)
                     continue
             chunks.append((posixpath.basename(name), text))
-    return title, chunks, dropped, toc_pos
+    return title, chunks, dropped, toc_pos, creators
 
 
 HEADING_RE = re.compile(r'^(#{1,6}) (.+)$')
@@ -329,6 +331,34 @@ def frontmatter(tags):
     return '\n'.join(lines) + '\n---\n\n'
 
 
+AUTHOR_JUNK = {'等', '著', '译', '编', '绘', '校', '主编', '著者', 'et', 'al', 'and'}
+
+
+def author_tags(creators):
+    """把 epub 的作者元数据洗成 `作者/<姓名>` 标签，一个作者一条。
+
+    dc:creator 常见脏写法（以下示例已化名）：`[某] 甲·乙`、`【某】丙·丁`、
+    `戊，己 等`。而 Obsidian 的标签只认字母数字（含中文等 Unicode 文字）、`_`、`-`、
+    层级分隔符 `/`，**不认空格和多数标点**（1.4 起，frontmatter 里带空格的标签会被直接劈成两条），
+    所以这里必须清洗：去国别前缀 → 按逗号分号拆多人 → 空格与间隔号换成连字符 → 其余标点删掉。
+    """
+    out = []
+    for raw in creators:
+        raw = re.sub(r'^\s*[【\[（(][^】\]）)]{1,12}[】\]）)]\s*', '', raw)
+        for frag in re.split(r'[，,、;；/]', raw):
+            toks = [t for t in frag.replace('\u3000', ' ').split() if t not in AUTHOR_JUNK]
+            name = '-'.join(toks)
+            name = re.sub(r'[·‧．・]', '-', name)
+            name = re.sub(r'[^\w-]', '', name)
+            name = re.sub(r'-{2,}', '-', name).strip('-_')
+            if not name or name in AUTHOR_JUNK or not re.search(r'[^0-9-]', name):
+                continue
+            tag = '作者/' + name
+            if tag not in out:
+                out.append(tag)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(prog='epub2md', description=__doc__.strip())
     ap.add_argument('epub')
@@ -342,10 +372,13 @@ def main():
     ap.add_argument('--keep-toc-page', action='store_true',
                     help='保留 epub 自带的纯文字目录页（默认剔除，避免和可点击目录重复）')
     ap.add_argument('--tags', help='写进文件开头 frontmatter 的 Obsidian 标签，逗号分隔，'
-                    '如 --tags 心理,成长；不传则不写 frontmatter，输出与旧版逐字节一致')
+                    '斜杠分级如 --tags 电子书/心理学/思维模式；不传则不写 frontmatter，'
+                    '输出与旧版逐字节一致。传了就会自动附上 作者/<姓名> 标签')
+    ap.add_argument('--no-author-tag', action='store_true',
+                    help='不自动附上从 epub 元数据清洗出来的 作者/<姓名> 标签')
     a = ap.parse_args()
 
-    title, chunks, dropped, toc_pos = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
+    title, chunks, dropped, toc_pos, creators = load_chunks(a.epub, drop_repeat_toc=not a.keep_toc_page)
 
     if a.stats:
         for i, (name, text) in enumerate(chunks, 1):
@@ -376,8 +409,11 @@ def main():
 
     out = os.path.abspath(a.out or posixpath.splitext(posixpath.basename(a.epub))[0] + '.md')
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    tags = parse_tags(a.tags) if a.tags else []
+    user_tags = parse_tags(a.tags) if a.tags else []
+    authors = [] if a.no_author_tag else author_tags(creators)
+    tags = list(user_tags)
     if tags:
+        tags += [t for t in authors if t not in tags]
         md = frontmatter(tags) + md
     with open(out, 'w', encoding='utf-8') as fh:
         fh.write(md)
@@ -387,6 +423,11 @@ def main():
         print('frontmatter 标签：%s' % '、'.join(tags))
     elif a.tags:
         print('!! --tags 里没有有效标签（只有分隔符），未写入 frontmatter')
+    elif authors:
+        print('提示：未传 --tags 就不写 frontmatter，作者标签 %s 也因此没写' % '、'.join(authors))
+    for t in user_tags:
+        if re.search(r'[^\w/-]', t):
+            print('!! 标签 %r 含 Obsidian 不认的字符（空格或标点），面板可能识别不了，建议用 - 连接' % t)
     print('目录 %d 条（样式 %s，深度 %d），正文 %d 字符'
           % (n_entries, a.toc_style, a.toc_depth, len(body)))
     for d in dropped:
